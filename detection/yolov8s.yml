@@ -1,0 +1,5 @@
+WEIGHTS: 'weights/yolov8n.pt'
+IMGSZ: [640,640]
+CONF_THRESHOLD: 0.7
+IOU_THRESHOLD: 0.5
+CLASS_IDS: [0]
