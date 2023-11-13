@@ -14,7 +14,6 @@ from search.milvus import MilvusDBWapper
 from search.faiss_search import FaissSearching
 import settings
 from service.utils import read_config, crop_person, get_current_time
-from service.s3 import S3Upload
 
 
 def draw_result(annotator, outputs):
@@ -30,129 +29,6 @@ def draw_result(annotator, outputs):
         else:
             color = colors(int(id), True)
         annotator.box_label(bbox, str(id), color=color)
-
-
-def insert_data(video_path):
-    print(video_path)
-    cam_id = video_path.split("/")[-1]
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    video_writer = cv2.VideoWriter(f'videos/visualize-{video_path.split("/")[-1]}', cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    tracker_camera = tracker_camera_dict[cam_id]
-    c = -1
-    q_trackers, represents, track_ids, bboxes, list_timestamp, inserted_path = [], [], [], [], [], []
-    list_feat, sources = [], []
-    uploader = S3Upload()
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        c += 1
-        annotator = Annotator(frame, line_width=2, example=str(1))
-        detected_result = detector.run([{'meta_data': [], 'frame': frame}])
-        dets = detected_result[0]['dets']
-        if not dets:
-            video_writer.write(frame)
-            continue
-        person_dets, persons_represents = crop_person(frame, dets)
-        tracker_camera.update(person_dets, persons_represents)
-        if c % 3 != 0:
-            if len(person_dets) > 0: 
-                q_trackers, represents, track_ids, bboxes, list_timestamp, list_path = [], [], [], [], [], []
-                for trk in tracker_camera.trackers:
-                    if trk.represent is not None:
-                        q_trackers.append(trk)
-                        represents.append(trk.represent)
-                        track_ids.append(str(trk.id) + "-" + str(trk.uuid))
-                        bboxes.append(str(trk.bbox.tolist()))
-                        list_timestamp.append(c/fps)
-                        # list_path.append(trk.path)
-                        timestamp = get_current_time("%Y-%m-%d %H:%M:%S.%f")
-                        date, timecode = timestamp.split(' ')
-                        s3_path = f'{cam_id}/{date}/{trk.id}/{timecode}.jpg'
-                        img_url = uploader.upload(trk.represent, s3_path)
-                        print(img_url)
-                        list_path.append(img_url)
-                if represents:
-                    feats = reid_model.run(represents)
-                    sources = [cam_id for _ in range(len(track_ids))]
-                    print([feats, sources, track_ids, bboxes, list_timestamp, list_path])
-                    print(feats.shape)
-                    inserted_data = [feats, sources, track_ids, bboxes, list_timestamp, list_path]
-                    inserted_ids = searcher.insert_db(inserted_data)
-                    print('Inserted id: ', inserted_ids)
-
-        updated_trackers = tracker_camera.get_current_trackers()
-        for trk in tracker_camera.trackers:
-            results[cam_id].add(trk.id)
-        # draw_result(annotator, updated_trackers)
-        # im0 = annotator.result()
-        # video_writer.write(im0)
-        # cv2.imwrite('vis.jpg', im0)
-        print(c)
-    # inserted_data = [list_feat, sources, track_ids, bboxes, list_timestamp]
-    # print('Inserted data: ', inserted_data)
-    # inserted_ids = searcher.insert_db(inserted_data)
-    print(inserted_ids)
-    searcher.get_collection_inf()
-    video_writer.release()
-    
-
-def search_data(video_path):
-    print(video_path)
-    cam_id = video_path.split("/")[-1]
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    video_writer = cv2.VideoWriter(f'videos/visualize-{video_path.split("/")[-1]}', cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-    tracker_camera = tracker_camera_dict[cam_id]
-    distance_thresh = settings.MILVUS_DB_CFG['DISTANCE_THRESH']
-    c = 0
-    while True:
-        c += 1
-        ret, frame = cap.read()
-        if not ret:
-            break
-        annotator = Annotator(frame, line_width=2, example=str(1))
-        detected_result = detector.run([{'meta_data': [], 'frame': frame}])
-        dets = detected_result[0]['dets']
-        if not dets:
-            video_writer.write(frame)
-            continue
-        person_dets, persons_represents = crop_person(frame, dets)
-        if len(person_dets) > 0:
-            curr_tracks, undefine_trackers, dead_tracks = tracker_camera.update(person_dets, persons_represents)
-            q_trackers, represents = [], []
-            for trk in tracker_camera.trackers:
-                if trk.represent is not None and trk.choose_id == -1:
-                    q_trackers.append(trk)
-                    represents.append(trk.represent)
-            if len(represents) > 0:
-                feats = reid_model.run(represents)
-                search_results = searcher.search(feats)
-                for i, (feat, result, trk) in enumerate(zip(feats, search_results, q_trackers)):
-                    if len(result) > 0:
-                        if result[0].distance < distance_thresh:
-                            print('top 1 search: ', result[0])
-                            # cv2.imwrite(f'data/new-track/{cam_id}_{c}_{i}.jpg', represents[i])
-                        else:
-                            print('top 1 search: ', result[0])
-                            print('Recognize this id: ', result[0])
-                            trk.update_id(result[0].entity.get('trackid'))
-                            # cv2.imwrite(f'data/recognized-track/{cam_id}_{c}_{result[0].id}_{result[0].distance}.jpg', represents[i])
-
-        updated_trackers = tracker_camera.get_current_trackers()
-        for trk in tracker_camera.trackers:
-            results[cam_id].add(trk.id)
-        draw_result(annotator, updated_trackers)
-        im0 = annotator.result()
-        video_writer.write(im0)
-        cv2.imwrite('vis.jpg', im0)
-    video_writer.release()
 
 
 def main_f(video_path, tracking_method, tracking_config):
